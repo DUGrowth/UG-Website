@@ -9,9 +9,41 @@ import {
   planServiceLayout,
   placeWordIntoGrid,
   wrapTextToLines,
+  type MatrixLetter,
   type PlaceWordIntoGridResult,
   type ServiceLayoutStep,
 } from "../src/utils/serviceRain";
+
+type DetailLetter = {
+  char: string;
+  cx: number;
+  tx: number;
+  ty: number;
+  y: number;
+  alpha?: number;
+};
+
+type SpotlightState = {
+  cx: number | null;
+  cy: number | null;
+  rx: number;
+  ry: number;
+  base: number;
+  edge: number;
+};
+
+type CtaRect = { label: string; href: string; x: number; y: number; w: number; h: number };
+
+type PlacedWord = PlaceWordIntoGridResult;
+
+const DEFAULT_SERVICE_DETAILS: Record<string, string> = {
+  "Social Media": "You’re a challenger, not a content farm. Lean engine that wins attention and turns it into qualified conversations.",
+  "Website": "Conversion-first sites that clarify your offer, signal credibility, and turn traffic into pipeline.",
+  "Email": "Clean lists, sharp copy, and lifecycle flows that nurture buyers and drive revenue without noise.",
+  "Automation": "Connect your tools, kill manual handoffs, and ship reliable automations that increase speed and reduce cost.",
+  "AI Implementation": "Use AI as a force multiplier. Practical copilots, prompts, and guardrails that cut cycle times and raise quality.",
+  "Prospecting & Pipeline": "Targeted outbound that finds right-fit accounts, opens doors on LinkedIn/email, and creates a repeatable path to meetings.",
+};
 
 // ===== Component (Stage 3: focus mode + detail rain + spotlight + CTAs) ===== //
 export default function MatrixServiceRain({
@@ -36,14 +68,7 @@ export default function MatrixServiceRain({
   regionEndFrac = 0.96,
   allowClickFocus = true,
   // Detail copy
-  serviceDetails = {
-    "Social Media": "You’re a challenger, not a content farm. Lean engine that wins attention and turns it into qualified conversations.",
-    "Website": "Conversion-first sites that clarify your offer, signal credibility, and turn traffic into pipeline.",
-    "Email": "Clean lists, sharp copy, and lifecycle flows that nurture buyers and drive revenue without noise.",
-    "Automation": "Connect your tools, kill manual handoffs, and ship reliable automations that increase speed and reduce cost.",
-    "AI Implementation": "Use AI as a force multiplier. Practical copilots, prompts, and guardrails that cut cycle times and raise quality.",
-    "Prospecting & Pipeline": "Targeted outbound that finds right-fit accounts, opens doors on LinkedIn/email, and creates a repeatable path to meetings.",
-  } as Record<string, string>,
+  serviceDetails = DEFAULT_SERVICE_DETAILS,
   // Spotlight CTAs under the detail
   ctaFaqHref = "#faq",
   ctaServicesHref = "#services",
@@ -81,23 +106,23 @@ export default function MatrixServiceRain({
   const measuredRef = useRef(false);
   const fsRef = useRef(baseFontSize);
 
-  const placedRef = useRef<PlaceWordIntoGridResult[]>([]);
+  const placedRef = useRef<PlacedWord[]>([]);
   const blockedRef = useRef<Set<string>>(new Set());
-  const placeTimerRef = useRef<any>(null);
+  const placeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const planRef = useRef<ServiceLayoutStep[] | null>(null);
 
   // focus/interaction
   const selectedIndexRef = useRef<number | null>(null);
   const hoverIndexRef = useRef<number | null>(null);
-  const detailLettersRef = useRef<any[]>([]);
-  const ctaRectsRef = useRef<Array<{ label: string; href: string; x: number; y: number; w: number; h: number }>>([]);
+  const detailLettersRef = useRef<DetailLetter[]>([]);
+  const ctaRectsRef = useRef<CtaRect[]>([]);
   const ctaHoverIndexRef = useRef<number | null>(null);
   const copyShownRef = useRef(false);
 
   // UI state
   const [paintedOnce, setPaintedOnce] = useState(false);
   const [focusedIdx, setFocusedIdx] = useState<number | null>(null);
-  const [spotlight, setSpotlight] = useState({ cx: null as number | null, cy: null as number | null, rx: 520, ry: 220, base: 0.6, edge: 0.88 });
+  const [spotlight, setSpotlight] = useState<SpotlightState>({ cx: null, cy: null, rx: 520, ry: 220, base: 0.6, edge: 0.88 });
 
   useEffect(() => {
     const container = containerRef.current;
@@ -191,31 +216,31 @@ export default function MatrixServiceRain({
       const idx = placedRef.current.length;
       const name = services[idx];
       const plan = planRef.current[idx];
-      const placed = placeWordIntoGrid(name, cols, rows, tmpBlocked, fs, idx, services.length, region, { lines: plan?.lines, baseRow: plan?.baseRow });
+      const placed: PlacedWord | null = placeWordIntoGrid(name, cols, rows, tmpBlocked, fs, idx, services.length, region, { lines: plan?.lines, baseRow: plan?.baseRow });
       if (placed) placedRef.current.push(placed);
     }, Math.max(300, cadenceMs));
 
     const charArr = chars.split("");
 
-    const hitTestWord = (mx: number, my: number) => {
+    const hitTestWord = (mx: number, my: number): number | null => {
       const fs = fsRef.current;
       for (let idx = 0; idx < placedRef.current.length; idx++) {
         const wObj = placedRef.current[idx];
         if (!wObj || !wObj.letters.length) continue;
-        const minX = Math.min(...wObj.letters.map((L: any) => L.x));
-        const maxX = Math.max(...wObj.letters.map((L: any) => L.x)) + fs;
-        const minY = Math.min(...wObj.letters.map((L: any) => (L.ty ?? L.y)));
-        const maxY = Math.max(...wObj.letters.map((L: any) => (L.ty ?? L.y))) + fs;
+        const minX = Math.min(...wObj.letters.map((L) => L.x));
+        const maxX = Math.max(...wObj.letters.map((L) => L.x)) + fs;
+        const minY = Math.min(...wObj.letters.map((L) => (L.ty ?? L.y)));
+        const maxY = Math.max(...wObj.letters.map((L) => (L.ty ?? L.y))) + fs;
         if (mx >= minX - fs * 0.2 && mx <= maxX + fs * 0.2 && my >= minY - fs * 0.2 && my <= maxY + fs * 0.2) return idx;
       }
       return null;
     };
 
-    function buildDetailLetters(copy: string, startRow: number) {
+    function buildDetailLetters(copy: string, startRow: number): void {
       const cols = colsRef.current; const fs = fsRef.current; const w = wRef.current;
       const maxWidth = Math.max(10, Math.min(cols - 4, Math.floor(cols * 0.66)));
       const lines = wrapTextToLines(copy, maxWidth, 6);
-      const letters: any[] = [];
+      const letters: DetailLetter[] = [];
       const centerX = Math.floor(w / 2);
       lines.forEach((line, li) => {
         const startX = Math.round(centerX - (line.length * fs) / 2);
@@ -228,12 +253,11 @@ export default function MatrixServiceRain({
           }
         }
       });
-      (letters as any).meta = { baseRow: startRow, copy };
       detailLettersRef.current = letters;
     }
 
-    function positionSpotlightToDetail(padX = 120, padY = 60) {
-      const letters: any[] = detailLettersRef.current;
+    function positionSpotlightToDetail(padX = 120, padY = 60): void {
+      const letters = detailLettersRef.current;
       const w = wRef.current; const h = hRef.current; const fs = fsRef.current;
       if (!letters || !letters.length) return;
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -251,7 +275,7 @@ export default function MatrixServiceRain({
       setSpotlight((s) => ({ ...s, cx, cy, rx, ry }));
     }
 
-    function focusWord(idx: number) {
+    function focusWord(idx: number): void {
       selectedIndexRef.current = idx; setFocusedIdx(idx);
       const rows = rowsRef.current; const w = wRef.current; const fs = fsRef.current;
       const targetRow = Math.floor(rows / 2);
@@ -259,7 +283,7 @@ export default function MatrixServiceRain({
       if (!word) return;
 
       // Build unified header string (concat wrapped lines with a space)
-      const headerText = (word.meta?.lines?.map((l: any) => l.text).join(" ") || word.text || "").trim();
+      const headerText = (word.meta?.lines?.map((l) => l.text).join(" ") || word.text || "").trim();
       const lenCols = headerText.length;
       const startX = Math.round((w - lenCols * fs) / 2);
       // Map existing letter objects onto positions that include spaces
@@ -277,18 +301,18 @@ export default function MatrixServiceRain({
 
       // Build detail block under header
       const name = services[idx];
-      const copy = (serviceDetails as any)?.[name] || "Details coming soon.";
+      const copy = serviceDetails?.[name] || "Details coming soon.";
       buildDetailLetters(copy, targetRow + 3);
       positionSpotlightToDetail();
     }
 
-    function clearFocus() {
+    function clearFocus(): void {
       const idx = selectedIndexRef.current;
       if (idx == null) return;
       const word = placedRef.current[idx];
       if (word) {
         // restore letters to their placed positions
-        word.letters.forEach((L: any) => { L.tx = L.x; L.y = L.y; L.locked = false; });
+        word.letters.forEach((L) => { L.tx = L.x; L.y = L.y; L.locked = false; });
       }
       detailLettersRef.current = [];
       selectedIndexRef.current = null; setFocusedIdx(null);
@@ -350,7 +374,7 @@ export default function MatrixServiceRain({
 
       // rebuild blocked map from current letters (covers wrapped lines without span reconstruction)
       const blocked = new Set<string>();
-      placedRef.current.forEach((wObj: any) => {
+      placedRef.current.forEach((wObj) => {
         for (const L of wObj.letters) {
           const col = Math.floor(L.x / fs);
           const row = Math.floor((L.ty ?? L.y) / fs);
@@ -395,14 +419,14 @@ export default function MatrixServiceRain({
             if (Math.abs(L.y - L.ty) < 0.5) { L.ty = L.y; L.locked = true; }
           }
         }
-        if (!wObj.letters.every((L: any) => L.locked)) allLocked = false;
+        if (!wObj.letters.every((L) => L.locked)) allLocked = false;
       }
 
       // showCopy gate for focus
       if (allLocked) copyShownRef.current = true;
 
       const sel = selectedIndexRef.current;
-      const selectedLetters: any[] = [];
+      const selectedLetters: MatrixLetter[] = [];
 
       for (let idx = 0; idx < placedRef.current.length; idx++) {
         const wObj = placedRef.current[idx];
@@ -432,7 +456,7 @@ export default function MatrixServiceRain({
         const wObj = placedRef.current[hoverIndexRef.current];
         if (wObj && wObj.letters.length) {
           const rowY = wObj.letters[0].ty ?? wObj.letters[0].y;
-          const minX = Math.min(...wObj.letters.map((L: any) => L.x));
+          const minX = Math.min(...wObj.letters.map((L) => L.x));
           ctx.fillStyle = colorMatrix(1);
           ctx.shadowColor = 'rgba(0,255,65,0.5)';
           ctx.shadowBlur = 8;
