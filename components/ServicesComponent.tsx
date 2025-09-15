@@ -1,231 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
 
-// ===== helpers ===== //
-function colorMatrix(alpha: number) { return `rgba(0,255,65,${alpha})`; }
-function clampInt(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
-function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
-function clamp01(v: number) { return clamp(v, 0, 1); }
-function computeRegion(cols: number, startFrac: number, endFrac: number) {
-  return { startCol: Math.floor(cols * startFrac), endCol: Math.floor(cols * endFrac) };
-}
-
-// Pre-plan uniform vertical spacing across services, accounting for wrapped (2-line) items
-function planServiceLayout(
-  services: string[],
-  cols: number,
-  rows: number,
-  region: { startCol: number; endCol: number },
-  margin = 1
-): Array<{ lines: string[]; baseRow: number }> {
-  // Pack services top→bottom using a *uniform inter-item gap*, regardless of wrapping.
-  // Each wrapped item consumes 2 row units (no blank row between its lines).
-  const top = 2; const bottom = Math.max(3, rows - 3);
-  const available = Math.max(0, bottom - top + 1);
-  const regionCols = Math.max(1, region.endCol - region.startCol + 1);
-  const maxLineLen = Math.max(1, regionCols - margin * 2);
-
-  const lineData = services.map((s) => splitIntoTwoLines(String(s), maxLineLen).lines.slice(0, 2));
-  const blockHeights = lineData.map((arr) => (arr.length === 2 ? 2 : 1));
-  const sumBlocks = blockHeights.reduce((a, b) => a + b, 0);
-  const gaps = Math.max(0, services.length - 1);
-  const leftover = Math.max(0, available - sumBlocks);
-  const gapRows = gaps > 0 ? Math.floor(leftover / gaps) : 0; // uniform gap between items
-  let extra = gaps > 0 ? (leftover % gaps) : 0; // distribute remainders to the first few gaps
-
-  const plan: Array<{ lines: string[]; baseRow: number }> = [];
-  let cursor = top;
-  for (let i = 0; i < services.length; i++) {
-    // place this block
-    plan.push({ lines: lineData[i], baseRow: cursor });
-    // advance cursor by block height + uniform gap (plus one-off extra if available)
-    if (i < services.length - 1) {
-      const advance = blockHeights[i] + gapRows + (extra > 0 ? 1 : 0);
-      cursor += advance;
-      if (extra > 0) extra--;
-    }
-  }
-
-  // Safety clamp: if last block overflows, shift everything up uniformly.
-  const lastIdx = services.length - 1;
-  const lastHeight = blockHeights[lastIdx] || 1;
-  const overflow = (plan[lastIdx].baseRow + lastHeight - 1) - bottom;
-  if (overflow > 0) {
-    for (const p of plan) p.baseRow = Math.max(top, p.baseRow - overflow);
-  }
-
-  return plan;
-}
-
-function canFitInRegion(
-  textLen: number,
-  startCol: number,
-  row: number,
-  blocked: Set<string>,
-  region: { startCol: number; endCol: number },
-  margin: number,
-  cols: number
-) {
-  // enforce hard bounds inside region and canvas
-  if (startCol < region.startCol + margin) return false;
-  if (startCol + textLen - 1 > region.endCol - margin) return false;
-  if (startCol < 0 || startCol + textLen - 1 >= cols) return false;
-  // collision check (span-wise, including spaces)
-  for (let i = 0; i < textLen; i++) {
-    const key = `${startCol + i},${row}`;
-    if (blocked.has(key)) return false;
-  }
-  return true;
-}
-
-function splitIntoTwoLines(text: string, maxLen: number): { lines: string[]; wrapped: boolean } {
-  if (text.length <= maxLen) return { lines: [text], wrapped: false };
-  // break at last space or hyphen within maxLen; fallback to hard split
-  let breakAt = -1;
-  for (let i = Math.min(maxLen, text.length - 1); i >= 1; i--) {
-    const ch = text[i];
-    if (ch === ' ' || ch === '-') { breakAt = i; break; }
-  }
-  if (breakAt === -1) breakAt = maxLen;
-  const first = text.slice(0, breakAt).trimEnd();
-  const rest = text.slice(breakAt).replace(/^\s+/, '');
-  return { lines: [first, rest], wrapped: true };
-}
-
-function wrapTextToLines(text: string, maxCols: number, maxLines = 6): string[] {
-  const words = String(text).split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-  let current = "";
-  for (const w of words) {
-    const join = current.length ? current + " " + w : w;
-    if (join.length <= maxCols) {
-      current = join;
-    } else {
-      if (current.length) lines.push(current);
-      current = w;
-      if (lines.length >= maxLines - 1) break;
-    }
-  }
-  if (current.length && lines.length < maxLines) lines.push(current);
-  return lines;
-}
-
-function drawRoundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-  r = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-
-// Core placer with optional two-line wrapping inside the region band
-function placeWordIntoGrid(
-  text: string,
-  cols: number,
-  rows: number,
-  blocked: Set<string>,
-  fontSize: number,
-  idx: number,
-  total: number,
-  region: { startCol: number; endCol: number },
-  opts?: { lines?: string[]; baseRow?: number }
-) {
-  if (!text || !cols || !rows) return null as any;
-  const clean = String(text);
-
-  // region metrics
-  const margin = 1; // keep inside by a column on each side
-  const regionCols = Math.max(1, region.endCol - region.startCol + 1);
-  const maxLineLen = Math.max(1, regionCols - margin * 2);
-
-  // two-line decision (prefer caller-provided split)
-  const providedLines = opts?.lines && opts.lines.length ? opts.lines.slice(0, 2) : null;
-  const { lines: initialLines } = providedLines ? { lines: providedLines } : splitIntoTwoLines(clean, maxLineLen);
-  const lines = initialLines.slice(0, 2);
-
-  // even vertical spacing across full height (ensure room for second line). Use caller baseRow if provided.
-  const LINE_GAP_ROWS = 1; // visual step between first and second line (no blank row)
-  const top = 2;
-  const bottom = Math.max(3, rows - 3);
-  const bands = Math.max(1, total);
-  let baseRow: number;
-  if (typeof opts?.baseRow === 'number') {
-    baseRow = clampInt(opts.baseRow, top, bottom);
-  } else if (bands === 1) {
-    baseRow = Math.floor((top + bottom) / 2);
-  } else {
-    const span = bottom - top;
-    baseRow = top + Math.round((idx * span) / (bands - 1));
-    baseRow = clampInt(baseRow, top, bottom);
-  }
-  if (lines.length === 2 && baseRow + 1 > bottom) baseRow = Math.max(2, bottom - 1);
-
-  // compute centred start col per line; then try nudges if blocked
-  const starts: number[] = [];
-  for (let li = 0; li < lines.length; li++) {
-    const L = lines[li];
-    const len = L.length;
-    const idealStart = region.startCol + Math.floor((regionCols - len) / 2);
-    const minStart = region.startCol + margin;
-    const maxStart = region.endCol - margin - len + 1;
-    let startCol = clampInt(idealStart, minStart, Math.min(maxStart, cols - len));
-
-    const row = baseRow + (li === 0 ? 0 : LINE_GAP_ROWS); // line 2 sits exactly one row below line 1
-    const fits = canFitInRegion(len, startCol, row, blocked, region, margin, cols);
-    if (!fits) {
-      let placed = false;
-      const sweepMax = Math.max(regionCols, 40);
-      for (let off = 1; off <= sweepMax; off++) {
-        const left = startCol - off;
-        const right = startCol + off;
-        if (left >= minStart && left <= maxStart && canFitInRegion(len, left, row, blocked, region, margin, cols)) {
-          startCol = left; placed = true; break;
-        }
-        if (right >= minStart && right <= maxStart && canFitInRegion(len, right, row, blocked, region, margin, cols)) {
-          startCol = right; placed = true; break;
-        }
-      }
-      if (!placed) {
-        // vertical fallback keeping two lines together
-        let solved = false;
-        for (let vOff = 1; vOff < rows; vOff++) {
-          const candidates = [baseRow - vOff, baseRow + vOff];
-          for (const cand of candidates) {
-            if (lines.length === 2 && (cand < top || cand + 1 > bottom)) continue;
-            const rowCand = cand + (li === 0 ? 0 : LINE_GAP_ROWS);
-            if (canFitInRegion(len, startCol, rowCand, blocked, region, margin, cols)) { baseRow = cand; solved = true; break; }
-          }
-          if (solved) break;
-        }
-        if (!solved) return null as any;
-      }
-    }
-    starts[li] = startCol;
-  }
-
-  // commit: generate letters and block spans (including spaces) for both lines
-  const letters: any[] = [];
-  const metaLines: Array<{ text: string; startCol: number; row: number }> = [];
-  for (let li = 0; li < lines.length; li++) {
-    const L = lines[li];
-    const startCol = starts[li];
-    const row = baseRow + (li === 0 ? 0 : LINE_GAP_ROWS);
-    metaLines.push({ text: L, startCol, row });
-    for (let i = 0; i < L.length; i++) {
-      const col = startCol + i;
-      const x = col * fontSize;
-      const y = row * fontSize;
-      if (L[i] !== ' ') {
-        letters.push({ char: L[i], x, y, ty: -100 - Math.random() * 300, locked: false });
-      }
-      blocked.add(`${col},${row}`);
-    }
-  }
-
-  return { text: clean, letters, meta: { lines: metaLines } };
-}
+import {
+  clamp,
+  clampInt,
+  colorMatrix,
+  computeRegion,
+  drawRoundedRect,
+  planServiceLayout,
+  placeWordIntoGrid,
+  wrapTextToLines,
+  type PlaceWordIntoGridResult,
+  type ServiceLayoutStep,
+} from "../src/utils/serviceRain";
 
 // ===== Component (Stage 3: focus mode + detail rain + spotlight + CTAs) ===== //
 export default function MatrixServiceRain({
@@ -295,10 +81,10 @@ export default function MatrixServiceRain({
   const measuredRef = useRef(false);
   const fsRef = useRef(baseFontSize);
 
-  const placedRef = useRef<any[]>([]);
+  const placedRef = useRef<PlaceWordIntoGridResult[]>([]);
   const blockedRef = useRef<Set<string>>(new Set());
   const placeTimerRef = useRef<any>(null);
-  const planRef = useRef<Array<{ lines: string[]; baseRow: number }> | null>(null);
+  const planRef = useRef<ServiceLayoutStep[] | null>(null);
 
   // focus/interaction
   const selectedIndexRef = useRef<number | null>(null);
@@ -387,15 +173,17 @@ export default function MatrixServiceRain({
 
       // temp blocked from existing placements using their meta lines
       const tmpBlocked = new Set<string>();
-      placedRef.current.forEach((wObj: any) => {
-        const lines = (wObj.meta?.lines || []) as Array<{ text: string; startCol: number; row: number }>;
+      placedRef.current.forEach((wObj) => {
+        const lines = wObj.meta?.lines ?? [];
         if (lines.length) {
           for (const ln of lines) {
             for (let i = 0; i < ln.text.length; i++) tmpBlocked.add(`${ln.startCol + i},${ln.row}`);
           }
         } else {
-          wObj.letters.forEach((L: any) => {
-            const col = Math.floor(L.x / fs); const row = Math.floor(L.y / fs); tmpBlocked.add(`${col},${row}`);
+          wObj.letters.forEach((letter) => {
+            const col = Math.floor(letter.x / fs);
+            const row = Math.floor(letter.y / fs);
+            tmpBlocked.add(`${col},${row}`);
           });
         }
       });
@@ -812,45 +600,3 @@ export default function MatrixServiceRain({
     </div>
   );
 }
-
-// ---- Lightweight console tests (run once in-browser) ---- //
-(function runMatrixServiceRainTests() {
-  if (typeof window === 'undefined') return;
-  const w = window as any;
-  if (w.__MSR_TESTS_RUN__) return; w.__MSR_TESTS_RUN__ = true;
-
-  // Test computeRegion
-  const r = computeRegion(100, 0.5, 0.8);
-  console.assert(r.startCol === 50 && r.endCol === 80, 'computeRegion failed');
-
-  // Test canFitInRegion basic true
-  const region = computeRegion(120, 0.6, 0.9);
-  const okBasic = canFitInRegion(4, region.startCol + 2, 10, new Set(), region, 1, 120);
-  console.assert(okBasic === true, 'canFitInRegion basic should be true');
-
-  // Test canFitInRegion out-of-bounds false
-  const bad = canFitInRegion(8, region.endCol - 2, 10, new Set(), region, 1, 120);
-  console.assert(bad === false, 'canFitInRegion should fail when exceeding region');
-
-  // Test placement centres and wraps when needed
-  const cols = 120; const rows = 40; const fs = 24;
-  const placed = placeWordIntoGrid('Prospecting & Pipeline', cols, rows, new Set(), fs, 5, 6, region);
-  console.assert(!!placed, 'placeWordIntoGrid should return a placement');
-  if (placed) {
-    const lines = (placed as any).meta.lines as Array<{ text: string; startCol: number; row: number }>;
-    console.assert(lines.length >= 1 && lines.length <= 2, 'should have 1 or 2 lines');
-  }
-
-  // Force a narrow band to require wrapping
-  const narrowRegion = computeRegion(40, 0.6, 0.9); // ~12 cols
-  const placedWrap = placeWordIntoGrid('ABCDEFGHIJKLMNOP', 40, 20, new Set(), 20, 1, 3, narrowRegion);
-  console.assert(!!placedWrap, 'wrapped placement should succeed');
-  if (placedWrap) {
-    const lines = (placedWrap as any).meta.lines as Array<{ text: string }>[];
-    console.assert(((placedWrap as any).meta.lines || []).length === 2, 'should wrap to two lines');
-  }
-
-  // Extra: wrapTextToLines never exceeds maxLines
-  const wrapped = wrapTextToLines('a '.repeat(200), 10, 5);
-  console.assert(wrapped.length <= 5, 'wrapTextToLines should respect maxLines');
-})();
