@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   clamp,
@@ -98,6 +98,34 @@ export default function MatrixServiceRain({
   const [paintedOnce, setPaintedOnce] = useState(false);
   const [focusedIdx, setFocusedIdx] = useState<number | null>(null);
   const [spotlight, setSpotlight] = useState({ cx: null as number | null, cy: null as number | null, rx: 520, ry: 220, base: 0.6, edge: 0.88 });
+
+  const clearFocus = useCallback(() => {
+    const idx = selectedIndexRef.current;
+    if (idx != null) {
+      const word = placedRef.current[idx];
+      if (word) {
+        word.letters.forEach((L: any) => {
+          if (typeof L.cx === "number") {
+            L.tx = L.cx;
+          } else {
+            L.tx = undefined;
+          }
+          L.locked = false;
+          if (typeof L.ty !== "number") {
+            L.ty = L.y;
+          }
+        });
+      }
+    }
+
+    detailLettersRef.current = [];
+    ctaRectsRef.current = [];
+    ctaHoverIndexRef.current = null;
+    hoverIndexRef.current = null;
+    selectedIndexRef.current = null;
+    setFocusedIdx(null);
+    setSpotlight((s) => ({ ...s, cx: null, cy: null }));
+  }, [setFocusedIdx, setSpotlight]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -271,7 +299,11 @@ export default function MatrixServiceRain({
         if (ch !== ' ') {
           const L = word.letters[consume++];
           if (!L) continue;
-          L.tx = x; L.y = y; if (typeof L.cx !== 'number') L.cx = L.x; L.ty = L.ty ?? L.y; L.locked = true; L.ty = y; // snap vertical to avoid wobble
+          L.tx = x;
+          if (typeof L.cx !== 'number') L.cx = L.x;
+          L.ty = L.ty ?? L.y;
+          L.locked = true;
+          L.ty = y; // snap vertical to avoid wobble
         }
       }
 
@@ -280,18 +312,6 @@ export default function MatrixServiceRain({
       const copy = (serviceDetails as any)?.[name] || "Details coming soon.";
       buildDetailLetters(copy, targetRow + 3);
       positionSpotlightToDetail();
-    }
-
-    function clearFocus() {
-      const idx = selectedIndexRef.current;
-      if (idx == null) return;
-      const word = placedRef.current[idx];
-      if (word) {
-        // restore letters to their placed positions
-        word.letters.forEach((L: any) => { L.tx = L.x; L.y = L.y; L.locked = false; });
-      }
-      detailLettersRef.current = [];
-      selectedIndexRef.current = null; setFocusedIdx(null);
     }
 
     // events
@@ -584,7 +604,8 @@ export default function MatrixServiceRain({
       {/* Back */}
       {focusedIdx != null && (
         <div className="absolute top-3 left-3 z-30">
-          <button onClick={() => { /* clear via ref-safe function */ const idx =  selectedIndexRef.current; if (idx!=null) { const ev = new Event('click'); } }}
+          <button
+            onClick={clearFocus}
             className="px-3 py-1.5 rounded-lg ring-1 ring-white/20 text-[#FDF7F0] hover:ring-white/40 bg-black/30 backdrop-blur-sm"
             onMouseDown={(e) => { e.stopPropagation(); }}
             onClickCapture={(e) => { e.stopPropagation(); }}
